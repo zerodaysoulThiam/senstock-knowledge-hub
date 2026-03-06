@@ -19,61 +19,117 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const lastUserMessage = [...messages].reverse().find((m: any) => m.role === "user")?.content || "";
-    
-    // Extract search terms (words > 3 chars)
-    const searchTerms = lastUserMessage.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
-    
+
+    // Fetch all chunks with document titles
+    const { data: chunks } = await supabase
+      .from("document_chunks")
+      .select("content, chunk_index, document_id")
+      .limit(200);
+
     let contextText = "";
-    if (searchTerms.length > 0) {
-      // Search in document_chunks for better granularity
-      const { data: chunks } = await supabase
-        .from("document_chunks")
-        .select("content, chunk_index, document_id")
-        .limit(50);
 
-      if (chunks && chunks.length > 0) {
-        // Get document titles for citation
-        const docIds = [...new Set(chunks.map((c: any) => c.document_id))];
-        const { data: docs } = await supabase
-          .from("documents")
-          .select("id, title")
-          .in("id", docIds);
-        const docMap = new Map((docs || []).map((d: any) => [d.id, d.title]));
+    if (chunks && chunks.length > 0) {
+      // Get document titles
+      const docIds = [...new Set(chunks.map((c: any) => c.document_id))];
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("id, title")
+        .in("id", docIds);
+      const docMap = new Map((docs || []).map((d: any) => [d.id, d.title]));
 
-        // Score chunks by keyword matches
-        const scored = chunks.map((chunk: any) => {
-          const text = chunk.content.toLowerCase();
-          const score = searchTerms.reduce((s: number, term: string) => s + (text.includes(term) ? 1 : 0), 0);
-          return { ...chunk, score, docTitle: docMap.get(chunk.document_id) || "Document inconnu" };
-        }).filter((c: any) => c.score > 0)
-          .sort((a: any, b: any) => b.score - a.score)
-          .slice(0, 5);
+      // Annotate chunks with doc titles
+      const annotatedChunks = chunks.map((c: any, i: number) => ({
+        ...c,
+        docTitle: docMap.get(c.document_id) || "Document inconnu",
+        idx: i,
+      }));
 
-        if (scored.length > 0) {
-          contextText = scored.map((c: any) => 
-            `[Source: ${c.docTitle}, Passage ${c.chunk_index + 1}]\n${c.content}`
-          ).join("\n\n---\n\n");
+      // Use LLM to semantically rerank chunks
+      const chunkSummaries = annotatedChunks.map((c: any) =>
+        `[${c.idx}] (${c.docTitle}, Passage ${c.chunk_index + 1}): ${c.content.substring(0, 200)}`
+      ).join("\n");
+
+      try {
+        const rerankResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${LOVABLE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-2.5-flash-lite",
+            messages: [
+              {
+                role: "system",
+                content: `Tu es un moteur de recherche sémantique. On te donne une question et une liste de passages de documents. Retourne UNIQUEMENT les indices (numéros entre crochets) des 5 passages les plus pertinents pour répondre à la question, du plus au moins pertinent. Format: un indice par ligne, juste le nombre. Si aucun passage n'est pertinent, écris "AUCUN".`
+              },
+              {
+                role: "user",
+                content: `Question: ${lastUserMessage}\n\nPassages:\n${chunkSummaries}`
+              }
+            ],
+          }),
+        });
+
+        if (rerankResponse.ok) {
+          const rerankData = await rerankResponse.json();
+          const rerankText = rerankData.choices?.[0]?.message?.content || "";
+
+          if (!rerankText.includes("AUCUN")) {
+            // Extract indices from response
+            const indices = rerankText.match(/\d+/g)?.map(Number).filter((n: number) => n < annotatedChunks.length).slice(0, 5) || [];
+
+            if (indices.length > 0) {
+              contextText = indices.map((idx: number) => {
+                const c = annotatedChunks[idx];
+                return `[Source: ${c.docTitle}, Passage ${c.chunk_index + 1}]\n${c.content}`;
+              }).join("\n\n---\n\n");
+            }
+          }
         }
+      } catch (e) {
+        console.error("Rerank error, falling back to keyword search:", e);
       }
 
-      // Fallback: search full documents if no chunks found
+      // Fallback: keyword search if reranking failed
       if (!contextText) {
-        const { data: docs } = await supabase
-          .from("documents")
-          .select("title, content")
-          .not("content", "is", null)
-          .limit(10);
-
-        if (docs && docs.length > 0) {
-          const scored = docs.map((doc: any) => {
-            const text = `${doc.title} ${doc.content}`.toLowerCase();
+        const searchTerms = lastUserMessage.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+        if (searchTerms.length > 0) {
+          const scored = annotatedChunks.map((c: any) => {
+            const text = c.content.toLowerCase();
             const score = searchTerms.reduce((s: number, term: string) => s + (text.includes(term) ? 1 : 0), 0);
-            return { ...doc, score };
-          }).filter((d: any) => d.score > 0).sort((a: any, b: any) => b.score - a.score).slice(0, 3);
+            return { ...c, score };
+          }).filter((c: any) => c.score > 0)
+            .sort((a: any, b: any) => b.score - a.score)
+            .slice(0, 5);
 
           if (scored.length > 0) {
-            contextText = scored.map((d: any) => `[Source: ${d.title}]\n${d.content?.substring(0, 2000)}`).join("\n\n---\n\n");
+            contextText = scored.map((c: any) =>
+              `[Source: ${c.docTitle}, Passage ${c.chunk_index + 1}]\n${c.content}`
+            ).join("\n\n---\n\n");
           }
+        }
+      }
+    }
+
+    // Fallback: full documents if no chunks
+    if (!contextText) {
+      const { data: docs } = await supabase
+        .from("documents")
+        .select("title, content")
+        .not("content", "is", null)
+        .limit(10);
+
+      if (docs && docs.length > 0) {
+        const searchTerms = lastUserMessage.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+        const scored = docs.map((doc: any) => {
+          const text = `${doc.title} ${doc.content}`.toLowerCase();
+          const score = searchTerms.reduce((s: number, term: string) => s + (text.includes(term) ? 1 : 0), 0);
+          return { ...doc, score };
+        }).filter((d: any) => d.score > 0).sort((a: any, b: any) => b.score - a.score).slice(0, 3);
+
+        if (scored.length > 0) {
+          contextText = scored.map((d: any) => `[Source: ${d.title}]\n${d.content?.substring(0, 2000)}`).join("\n\n---\n\n");
         }
       }
     }
