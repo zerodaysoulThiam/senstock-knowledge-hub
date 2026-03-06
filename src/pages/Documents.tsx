@@ -1,30 +1,17 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { motion } from "framer-motion";
-import { FileText, Upload, Trash2, Search, File, FileSpreadsheet, Globe, BookOpen } from "lucide-react";
-
-interface Doc {
-  id: number;
-  name: string;
-  type: string;
-  size: string;
-  date: string;
-  status: "indexé" | "en cours" | "erreur";
-}
-
-const mockDocs: Doc[] = [
-  { id: 1, name: "Procédures de sécurité SenStock 2024", type: "PDF", size: "2.4 MB", date: "2024-12-15", status: "indexé" },
-  { id: 2, name: "Manuel opérationnel des réservoirs", type: "PDF", size: "5.1 MB", date: "2024-11-20", status: "indexé" },
-  { id: 3, name: "Inventaire des stocks Q4 2024", type: "Excel", size: "1.8 MB", date: "2024-12-01", status: "indexé" },
-  { id: 4, name: "Politique RH — Intégration nouveaux employés", type: "Word", size: "890 KB", date: "2024-10-10", status: "indexé" },
-  { id: 5, name: "Guide de maintenance des pompes", type: "PDF", size: "3.2 MB", date: "2024-09-05", status: "en cours" },
-  { id: 6, name: "Normes QHSE applicables", type: "PDF", size: "1.5 MB", date: "2024-08-20", status: "indexé" },
-];
+import { FileText, Upload, Trash2, Search, File, FileSpreadsheet, BookOpen, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 const typeIcon: Record<string, typeof FileText> = {
-  PDF: FileText,
-  Excel: FileSpreadsheet,
-  Word: File,
-  Web: Globe,
+  "application/pdf": FileText,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": File,
+  "text/plain": FileText,
+  pdf: FileText,
+  docx: File,
+  txt: FileText,
 };
 
 const statusColors: Record<string, string> = {
@@ -35,10 +22,85 @@ const statusColors: Record<string, string> = {
 
 const Documents = () => {
   const [search, setSearch] = useState("");
-  const [docs] = useState<Doc[]>(mockDocs);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
 
-  const filtered = docs.filter((d) =>
-    d.name.toLowerCase().includes(search.toLowerCase())
+  const { data: docs = [], isLoading } = useQuery({
+    queryKey: ["documents"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("documents")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from("documents").delete().eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      toast.success("Document supprimé");
+    },
+    onError: () => toast.error("Erreur lors de la suppression"),
+  });
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const allowedTypes = [
+      "application/pdf",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
+    ];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error("Type de fichier non supporté. Utilisez PDF, DOCX ou TXT.");
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const filePath = `${Date.now()}_${file.name}`;
+      const { error: uploadError } = await supabase.storage
+        .from("documents")
+        .upload(filePath, file);
+      if (uploadError) throw uploadError;
+
+      const { data: urlData } = supabase.storage
+        .from("documents")
+        .getPublicUrl(filePath);
+
+      // Call extract-text edge function
+      const { data, error } = await supabase.functions.invoke("extract-text", {
+        body: {
+          file_url: urlData.publicUrl,
+          title: file.name,
+          file_type: file.type,
+          file_size: `${(file.size / 1024).toFixed(0)} KB`,
+        },
+      });
+
+      if (error) throw error;
+
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      toast.success("Document téléversé et indexé avec succès !");
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || "Erreur lors du téléversement");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const filtered = docs.filter((d: any) =>
+    d.title.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -49,12 +111,21 @@ const Documents = () => {
             <h1 className="font-display text-3xl font-bold text-foreground">Documents</h1>
             <p className="text-muted-foreground mt-1">Base de connaissances SenStock AI Brain</p>
           </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.txt"
+            className="hidden"
+            onChange={handleUpload}
+          />
           <button
-            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-display font-semibold text-sm text-primary-foreground transition-all hover:opacity-90"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-display font-semibold text-sm text-primary-foreground transition-all hover:opacity-90 disabled:opacity-50"
             style={{ background: "var(--gradient-primary)" }}
           >
-            <Upload className="w-4 h-4" />
-            Importer un document
+            {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            {uploading ? "Téléversement..." : "Téléverser un document"}
           </button>
         </div>
 
@@ -87,7 +158,7 @@ const Documents = () => {
             </div>
             <div>
               <div className="text-xl font-display font-bold text-foreground">
-                {docs.filter((d) => d.status === "indexé").length}
+                {docs.filter((d: any) => d.status === "indexé").length}
               </div>
               <div className="text-sm text-muted-foreground">Indexés</div>
             </div>
@@ -98,7 +169,7 @@ const Documents = () => {
             </div>
             <div>
               <div className="text-xl font-display font-bold text-foreground">
-                {docs.filter((d) => d.status === "en cours").length}
+                {docs.filter((d: any) => d.status === "en cours").length}
               </div>
               <div className="text-sm text-muted-foreground">En cours</div>
             </div>
@@ -107,48 +178,65 @@ const Documents = () => {
 
         {/* Table */}
         <div className="senstock-card overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b bg-muted/50">
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Document</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Type</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Taille</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Date</th>
-                  <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Statut</th>
-                  <th className="text-right px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((doc) => {
-                  const Icon = typeIcon[doc.type] || FileText;
-                  return (
-                    <tr key={doc.id} className="border-b last:border-0 hover:bg-muted/30 transition-colors">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <Icon className="w-5 h-5 text-primary flex-shrink-0" />
-                          <span className="text-sm font-medium text-foreground">{doc.name}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-sm text-muted-foreground">{doc.type}</td>
-                      <td className="px-6 py-4 text-sm text-muted-foreground">{doc.size}</td>
-                      <td className="px-6 py-4 text-sm text-muted-foreground">{doc.date}</td>
-                      <td className="px-6 py-4">
-                        <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${statusColors[doc.status]}`}>
-                          {doc.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button className="text-muted-foreground hover:text-destructive transition-colors">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {isLoading ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-16 text-muted-foreground">
+              <FileText className="w-12 h-12 mx-auto mb-4 opacity-30" />
+              <p className="font-display font-semibold">Aucun document téléversé pour le moment.</p>
+              <p className="text-sm mt-1">Cliquez sur « Téléverser un document » pour commencer.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b bg-muted/50">
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Document</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Type</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Taille</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Date</th>
+                    <th className="text-left px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Statut</th>
+                    <th className="text-right px-6 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((doc: any) => {
+                    const Icon = typeIcon[doc.file_type] || FileText;
+                    return (
+                      <tr key={doc.id} className="border-b last:border-0 hover:bg-muted/30 transition-colors">
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-3">
+                            <Icon className="w-5 h-5 text-primary flex-shrink-0" />
+                            <span className="text-sm font-medium text-foreground">{doc.title}</span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-sm text-muted-foreground">{doc.file_type}</td>
+                        <td className="px-6 py-4 text-sm text-muted-foreground">{doc.file_size}</td>
+                        <td className="px-6 py-4 text-sm text-muted-foreground">
+                          {new Date(doc.created_at).toLocaleDateString("fr-FR")}
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${statusColors[doc.status] || ""}`}>
+                            {doc.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            onClick={() => deleteMutation.mutate(doc.id)}
+                            className="text-muted-foreground hover:text-destructive transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </motion.div>
     </div>
