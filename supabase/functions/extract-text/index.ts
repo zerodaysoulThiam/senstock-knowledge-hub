@@ -6,6 +6,18 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+function chunkText(text: string, chunkSize = 800, overlap = 100): string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    const chunk = text.slice(start, end).trim();
+    if (chunk.length > 20) chunks.push(chunk);
+    start += chunkSize - overlap;
+  }
+  return chunks;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -28,7 +40,6 @@ serve(async (req) => {
     } else {
       // For PDF and DOCX, extract raw text (basic extraction)
       const rawText = textDecoder.decode(fileBuffer);
-      // Extract readable text segments from binary
       extractedText = rawText.replace(/[^\x20-\x7E\xC0-\xFF\n\r\t àâäéèêëïîôùûüÿçœæÀÂÄÉÈÊËÏÎÔÙÛÜŸÇŒÆ]/g, ' ')
         .replace(/\s{3,}/g, '\n')
         .trim();
@@ -64,10 +75,12 @@ serve(async (req) => {
       } catch { /* keep raw text */ }
     }
 
+    const fullContent = extractedText.substring(0, 50000);
+
     // Save to documents table
     const { data, error } = await supabase.from("documents").insert({
       title,
-      content: extractedText.substring(0, 50000),
+      content: fullContent,
       file_url,
       file_type,
       file_size,
@@ -77,7 +90,19 @@ serve(async (req) => {
 
     if (error) throw error;
 
-    return new Response(JSON.stringify({ success: true, document: data }), {
+    // Create chunks for RAG search
+    const chunks = chunkText(fullContent);
+    if (chunks.length > 0) {
+      const chunkRows = chunks.map((content, i) => ({
+        document_id: data.id,
+        content,
+        chunk_index: i,
+      }));
+      const { error: chunkError } = await supabase.from("document_chunks").insert(chunkRows);
+      if (chunkError) console.error("Chunk insert error:", chunkError);
+    }
+
+    return new Response(JSON.stringify({ success: true, document: data, chunks_created: chunks.length }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
