@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { motion } from "framer-motion";
-import { FileText, Upload, Trash2, Search, File, FileSpreadsheet, BookOpen, Loader2 } from "lucide-react";
+import { FileText, Upload, Trash2, Search, File, FileSpreadsheet, BookOpen, Loader2, Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -222,7 +222,18 @@ const Documents = () => {
                             {doc.status}
                           </span>
                         </td>
-                        <td className="px-6 py-4 text-right">
+                        <td className="px-6 py-4 text-right flex items-center justify-end gap-2">
+                          {doc.file_url && (
+                            <a
+                              href={doc.file_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-muted-foreground hover:text-primary transition-colors"
+                              title="Télécharger"
+                            >
+                              <Download className="w-4 h-4" />
+                            </a>
+                          )}
                           <button
                             onClick={() => deleteMutation.mutate(doc.id)}
                             className="text-muted-foreground hover:text-destructive transition-colors"
