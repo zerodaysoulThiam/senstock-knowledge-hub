@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,7 +9,6 @@ const corsHeaders = {
 
 function chunkText(text: string, chunkSize = 800, overlap = 100): string[] {
   const chunks: string[] = [];
-  // Split by paragraphs first for better semantic boundaries
   const paragraphs = text.split(/\n\s*\n/);
   let currentChunk = "";
 
@@ -18,7 +18,6 @@ function chunkText(text: string, chunkSize = 800, overlap = 100): string[] {
 
     if (currentChunk.length + trimmed.length + 1 > chunkSize && currentChunk.length > 50) {
       chunks.push(currentChunk.trim());
-      // Keep overlap from the end of previous chunk
       const overlapText = currentChunk.slice(-overlap);
       currentChunk = overlapText + " " + trimmed;
     } else {
@@ -30,7 +29,6 @@ function chunkText(text: string, chunkSize = 800, overlap = 100): string[] {
     chunks.push(currentChunk.trim());
   }
 
-  // If no paragraph-based chunks were created, fall back to character-based
   if (chunks.length === 0 && text.length > 50) {
     let start = 0;
     while (start < text.length) {
@@ -64,20 +62,20 @@ serve(async (req) => {
     const isTxt = file_type === "text/plain" || file_type === "txt" || title.endsWith(".txt");
 
     if (isTxt) {
-      // TXT: direct read
       extractedText = new TextDecoder("utf-8").decode(uint8Array);
     } else if (LOVABLE_API_KEY) {
-      // PDF and DOCX: Use Gemini multimodal to extract ALL text content
-      // This handles scanned PDFs, complex layouts, embedded fonts, etc.
-      const base64Content = btoa(String.fromCharCode(...uint8Array));
+      // Use safe base64 encoding for large files (no spread operator limit)
+      const base64Content = base64Encode(uint8Array);
 
       const isPdf = file_type === "application/pdf" || file_type === "pdf" || title.endsWith(".pdf");
       const mimeType = isPdf
         ? "application/pdf"
         : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-      console.log(`Extracting text from ${title} (${mimeType}) using Gemini multimodal...`);
+      console.log(`Extracting text from ${title} (${mimeType}, ${uint8Array.length} bytes)...`);
 
+      // Use image_url format with data URI - this is the correct way to send
+      // documents through the OpenAI-compatible gateway for Gemini models
       const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -88,32 +86,29 @@ serve(async (req) => {
           model: "google/gemini-2.5-flash",
           messages: [
             {
-              role: "system",
-              content: `Tu es un extracteur de texte professionnel. Tu reçois un document (PDF ou DOCX). 
-              
-INSTRUCTIONS CRITIQUES :
-- Extrais TOUT le texte du document, page par page, sans rien omettre.
-- Conserve la structure : titres, sous-titres, paragraphes, listes, tableaux.
-- Pour les tableaux, utilise un format lisible (lignes séparées par |).
-- Indique les numéros de page avec le marqueur [Page X] au début de chaque page.
-- Si le document contient des images avec du texte (scannés), effectue l'OCR et extrais le texte.
-- Ne résume JAMAIS. Extrais le texte INTÉGRAL et COMPLET.
-- Ne commente pas, ne rajoute rien. Retourne UNIQUEMENT le texte extrait du document.
-- Si une page est vide ou illisible, indique [Page X - contenu illisible ou vide].`
-            },
-            {
               role: "user",
               content: [
                 {
-                  type: "file",
-                  file: {
-                    filename: title,
-                    file_data: `data:${mimeType};base64,${base64Content}`,
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${mimeType};base64,${base64Content}`,
                   },
                 },
                 {
                   type: "text",
-                  text: `Extrais TOUT le texte de ce document "${title}" page par page. Texte intégral, complet, sans résumé.`,
+                  text: `Extrais INTÉGRALEMENT tout le texte contenu dans ce document "${title}".
+
+INSTRUCTIONS OBLIGATOIRES :
+- Extrais TOUT le texte réel du document, page par page.
+- Indique [Page X] au début de chaque page.
+- Conserve la structure : titres, sous-titres, paragraphes, listes à puces, tableaux.
+- Pour les tableaux, formate avec des | pour séparer les colonnes.
+- Si le document est scanné, effectue l'OCR pour extraire le texte des images.
+- NE RÉSUME JAMAIS. Retourne le texte COMPLET et INTÉGRAL.
+- NE DÉCRIS PAS le document. NE PARLE PAS de la structure PDF interne.
+- NE MENTIONNE PAS les métadonnées, les polices, les objets PDF, les flux de contenu.
+- Retourne UNIQUEMENT le texte que lirait un humain en ouvrant ce document.
+- Si une page est vide, écris [Page X - vide].`,
                 },
               ],
             },
@@ -126,9 +121,9 @@ INSTRUCTIONS CRITIQUES :
         const content = aiData.choices?.[0]?.message?.content;
         if (content && content.length > 50) {
           extractedText = content;
-          console.log(`Successfully extracted ${extractedText.length} characters from ${title}`);
+          console.log(`Extracted ${extractedText.length} characters from ${title}`);
         } else {
-          console.error("AI extraction returned insufficient content");
+          console.error("AI extraction returned insufficient content:", content?.substring(0, 200));
         }
       } else {
         const errText = await aiResponse.text();
@@ -145,11 +140,11 @@ INSTRUCTIONS CRITIQUES :
         .trim();
 
       if (extractedText.length < 50) {
-        extractedText = `[Document ${title} - Le contenu n'a pas pu être extrait. Type: ${file_type}. Veuillez vérifier le format du fichier.]`;
+        extractedText = `[Document ${title} - Le contenu n'a pas pu être extrait. Type: ${file_type}.]`;
       }
     }
 
-    const fullContent = extractedText.substring(0, 100000); // Allow up to 100k chars
+    const fullContent = extractedText.substring(0, 100000);
 
     // Save to documents table
     const { data, error } = await supabase
@@ -177,7 +172,6 @@ INSTRUCTIONS CRITIQUES :
         chunk_index: i,
       }));
       
-      // Insert in batches of 50 to avoid payload limits
       for (let i = 0; i < chunkRows.length; i += 50) {
         const batch = chunkRows.slice(i, i + 50);
         const { error: chunkError } = await supabase.from("document_chunks").insert(batch);
@@ -185,7 +179,7 @@ INSTRUCTIONS CRITIQUES :
       }
     }
 
-    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks created`);
+    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks`);
 
     return new Response(
       JSON.stringify({
