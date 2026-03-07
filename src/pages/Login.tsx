@@ -1,27 +1,29 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Brain, Eye, EyeOff, ArrowRight } from "lucide-react";
+import { Brain, Eye, EyeOff, ArrowRight, Loader2 } from "lucide-react";
 import { motion } from "framer-motion";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 const Login = () => {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError("");
+    setLoading(true);
 
-    // Demo auth - in production this would use Supabase auth
-    if (
-      (username === "passer" && password === "passer") ||
-      (username === "matar" && password === "passer")
-    ) {
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
       navigate("/dashboard");
-    } else {
-      setError("Identifiants incorrects. Veuillez réessayer.");
+    } catch (err: any) {
+      toast.error(err.message || "Identifiants incorrects. Veuillez réessayer.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -55,9 +57,7 @@ const Login = () => {
           <div className="w-24 h-24 rounded-2xl bg-primary-foreground/10 backdrop-blur-sm flex items-center justify-center mx-auto mb-8 border border-primary-foreground/20">
             <Brain className="w-12 h-12 text-primary-foreground" />
           </div>
-          <h1 className="font-display text-5xl font-bold text-primary-foreground mb-4">
-            SenStock
-          </h1>
+          <h1 className="font-display text-5xl font-bold text-primary-foreground mb-4">SenStock</h1>
           <p className="text-xl text-primary-foreground/80 font-display">AI Brain</p>
           <p className="mt-6 text-primary-foreground/60 max-w-md leading-relaxed">
             Le cerveau numérique de SenStock. Accédez à l'intelligence artificielle
@@ -94,37 +94,23 @@ const Login = () => {
             <span className="font-display text-xl font-bold text-foreground">SenStock AI Brain</span>
           </div>
 
-          <h2 className="font-display text-3xl font-bold text-foreground mb-2">
-            Connexion
-          </h2>
-          <p className="text-muted-foreground mb-8">
-            Accédez à votre espace SenStock AI Brain
-          </p>
-
-          {error && (
-            <div className="mb-6 p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
-              {error}
-            </div>
-          )}
+          <h2 className="font-display text-3xl font-bold text-foreground mb-2">Connexion</h2>
+          <p className="text-muted-foreground mb-8">Accédez à votre espace SenStock AI Brain</p>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-foreground mb-2">
-                Nom d'utilisateur
-              </label>
+              <label className="block text-sm font-medium text-foreground mb-2">Email</label>
               <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 className="senstock-input w-full"
-                placeholder="Entrez votre identifiant"
+                placeholder="votre@email.com"
                 required
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-foreground mb-2">
-                Mot de passe
-              </label>
+              <label className="block text-sm font-medium text-foreground mb-2">Mot de passe</label>
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -144,23 +130,15 @@ const Login = () => {
               </div>
             </div>
 
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                <input type="checkbox" className="rounded border-input" />
-                Se souvenir de moi
-              </label>
-              <button type="button" className="text-sm text-primary hover:underline">
-                Mot de passe oublié ?
-              </button>
-            </div>
-
             <button
               type="submit"
-              className="w-full py-3 rounded-lg font-display font-semibold text-primary-foreground flex items-center justify-center gap-2 transition-all hover:opacity-90 active:scale-[0.98]"
+              disabled={loading}
+              className="w-full py-3 rounded-lg font-display font-semibold text-primary-foreground flex items-center justify-center gap-2 transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
               style={{ background: "var(--gradient-primary)" }}
             >
-              Se connecter
-              <ArrowRight className="w-4 h-4" />
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {loading ? "Connexion..." : "Se connecter"}
+              {!loading && <ArrowRight className="w-4 h-4" />}
             </button>
           </form>
 

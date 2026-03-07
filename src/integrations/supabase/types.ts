@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      chat_messages: {
+        Row: {
+          content: string
+          created_at: string
+          id: string
+          role: string
+          user_id: string
+        }
+        Insert: {
+          content: string
+          created_at?: string
+          id?: string
+          role: string
+          user_id: string
+        }
+        Update: {
+          content?: string
+          created_at?: string
+          id?: string
+          role?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       document_chunks: {
         Row: {
           chunk_index: number
@@ -46,6 +70,38 @@ export type Database = {
           },
         ]
       }
+      document_views: {
+        Row: {
+          document_id: string
+          id: string
+          ip_address: string | null
+          user_id: string | null
+          viewed_at: string
+        }
+        Insert: {
+          document_id: string
+          id?: string
+          ip_address?: string | null
+          user_id?: string | null
+          viewed_at?: string
+        }
+        Update: {
+          document_id?: string
+          id?: string
+          ip_address?: string | null
+          user_id?: string | null
+          viewed_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "document_views_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       documents: {
         Row: {
           category: string | null
@@ -55,8 +111,13 @@ export type Database = {
           file_type: string | null
           file_url: string | null
           id: string
+          keywords: string | null
+          last_viewed_at: string | null
           status: string | null
+          summary: string | null
           title: string
+          uploaded_by: string | null
+          view_count: number
         }
         Insert: {
           category?: string | null
@@ -66,8 +127,13 @@ export type Database = {
           file_type?: string | null
           file_url?: string | null
           id?: string
+          keywords?: string | null
+          last_viewed_at?: string | null
           status?: string | null
+          summary?: string | null
           title: string
+          uploaded_by?: string | null
+          view_count?: number
         }
         Update: {
           category?: string | null
@@ -77,8 +143,13 @@ export type Database = {
           file_type?: string | null
           file_url?: string | null
           id?: string
+          keywords?: string | null
+          last_viewed_at?: string | null
           status?: string | null
+          summary?: string | null
           title?: string
+          uploaded_by?: string | null
+          view_count?: number
         }
         Relationships: []
       }

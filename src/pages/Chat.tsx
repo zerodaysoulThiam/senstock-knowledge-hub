@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Brain, User, Sparkles } from "lucide-react";
+import { Send, Brain, User, Sparkles, Loader2, History, Plus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 interface Message {
   role: "user" | "assistant";
@@ -22,11 +23,47 @@ const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Load user and chat history
+  useEffect(() => {
+    const loadHistory = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setLoadingHistory(false); return; }
+      setUserId(user.id);
+      
+      const { data } = await supabase
+        .from("chat_messages")
+        .select("role, content")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true })
+        .limit(100);
+      
+      if (data && data.length > 0) {
+        setMessages(data.map((m: any) => ({ role: m.role, content: m.content })));
+      }
+      setLoadingHistory(false);
+    };
+    loadHistory();
+  }, []);
+
+  const saveMessage = async (role: string, content: string) => {
+    if (!userId) return;
+    await supabase.from("chat_messages").insert({ user_id: userId, role, content });
+  };
+
+  const clearHistory = async () => {
+    if (!userId) return;
+    await supabase.from("chat_messages").delete().eq("user_id", userId);
+    setMessages([]);
+    toast.success("Historique effacé");
+  };
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || isLoading) return;
@@ -35,6 +72,8 @@ const Chat = () => {
     setMessages(allMessages);
     setInput("");
     setIsLoading(true);
+
+    await saveMessage("user", text.trim());
 
     let assistantSoFar = "";
     const upsertAssistant = (chunk: string) => {
@@ -58,7 +97,7 @@ const Chat = () => {
         body: JSON.stringify({ messages: allMessages }),
       });
 
-      if (resp.status === 429) { toast.error("Limite de requêtes atteinte, réessayez plus tard."); setIsLoading(false); return; }
+      if (resp.status === 429) { toast.error("Limite de requêtes atteinte."); setIsLoading(false); return; }
       if (resp.status === 402) { toast.error("Crédits IA insuffisants."); setIsLoading(false); return; }
       if (!resp.ok || !resp.body) throw new Error("Erreur de connexion");
 
@@ -90,6 +129,10 @@ const Chat = () => {
           }
         }
       }
+
+      if (assistantSoFar) {
+        await saveMessage("assistant", assistantSoFar);
+      }
     } catch (e: any) {
       console.error(e);
       toast.error("Erreur lors de la communication avec l'IA");
@@ -103,9 +146,16 @@ const Chat = () => {
     sendMessage(input);
   };
 
+  if (loadingHistory) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-screen">
-      {/* Header */}
       <div className="border-b bg-card px-6 py-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: "var(--gradient-primary)" }}>
@@ -115,14 +165,20 @@ const Chat = () => {
             <h1 className="font-display font-semibold text-foreground">SenStock AI Brain</h1>
             <p className="text-xs text-muted-foreground">Assistant intelligent · Base documentaire active</p>
           </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-            <span className="text-xs text-muted-foreground">En ligne</span>
+          <div className="ml-auto flex items-center gap-2">
+            {messages.length > 0 && (
+              <button onClick={clearHistory} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+                <Plus className="w-3.5 h-3.5" /> Nouvelle conversation
+              </button>
+            )}
+            <div className="flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+              <span className="text-xs text-muted-foreground">En ligne</span>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center justify-center h-full max-w-lg mx-auto text-center">
@@ -175,7 +231,6 @@ const Chat = () => {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
       <div className="border-t bg-card px-4 py-4">
         <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex gap-3">
           <input

@@ -1,33 +1,99 @@
 import { motion } from "framer-motion";
-import { BarChart3, TrendingUp, MessageSquare, FileText, Clock, Brain } from "lucide-react";
+import { MessageSquare, FileText, Clock, Brain, Loader2, Users } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from "recharts";
+import { supabase } from "@/integrations/supabase/client";
+import { useQuery } from "@tanstack/react-query";
 
-const topicData = [
-  { name: "Procédures", value: 35, fill: "hsl(210, 80%, 45%)" },
-  { name: "Stocks", value: 25, fill: "hsl(195, 85%, 42%)" },
-  { name: "Logistique", value: 20, fill: "hsl(152, 60%, 42%)" },
-  { name: "RH", value: 12, fill: "hsl(38, 92%, 50%)" },
-  { name: "Autres", value: 8, fill: "hsl(215, 15%, 50%)" },
-];
-
-const monthlyData = [
-  { month: "Jul", questions: 180 },
-  { month: "Aoû", questions: 220 },
-  { month: "Sep", questions: 310 },
-  { month: "Oct", questions: 290 },
-  { month: "Nov", questions: 340 },
-  { month: "Déc", questions: 380 },
-];
-
-const topDocs = [
-  { name: "Procédures de sécurité 2024", uses: 234 },
-  { name: "Manuel opérationnel des réservoirs", uses: 189 },
-  { name: "Normes QHSE", uses: 156 },
-  { name: "Guide de maintenance des pompes", uses: 123 },
-  { name: "Politique RH", uses: 98 },
+const COLORS = [
+  "hsl(210, 80%, 45%)",
+  "hsl(195, 85%, 42%)",
+  "hsl(152, 60%, 42%)",
+  "hsl(38, 92%, 50%)",
+  "hsl(215, 15%, 50%)",
 ];
 
 const Stats = () => {
+  const { data: totalQuestions = 0 } = useQuery({
+    queryKey: ["stats-questions"],
+    queryFn: async () => {
+      const { count } = await supabase.from("chat_messages").select("*", { count: "exact", head: true }).eq("role", "user");
+      return count || 0;
+    },
+  });
+
+  const { data: totalDocs = 0 } = useQuery({
+    queryKey: ["stats-docs"],
+    queryFn: async () => {
+      const { count } = await supabase.from("documents").select("*", { count: "exact", head: true });
+      return count || 0;
+    },
+  });
+
+  const { data: totalUsers = 0 } = useQuery({
+    queryKey: ["stats-users"],
+    queryFn: async () => {
+      const { count } = await supabase.from("profiles").select("*", { count: "exact", head: true });
+      return count || 0;
+    },
+  });
+
+  const { data: totalResponses = 0 } = useQuery({
+    queryKey: ["stats-responses"],
+    queryFn: async () => {
+      const { count } = await supabase.from("chat_messages").select("*", { count: "exact", head: true }).eq("role", "assistant");
+      return count || 0;
+    },
+  });
+
+  const { data: monthlyData = [] } = useQuery({
+    queryKey: ["stats-monthly"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("chat_messages")
+        .select("created_at")
+        .eq("role", "user");
+      if (!data || data.length === 0) return [];
+
+      const months: Record<string, number> = {};
+      const monthNames = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jun", "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc"];
+      data.forEach((m: any) => {
+        const d = new Date(m.created_at);
+        const key = `${d.getFullYear()}-${d.getMonth()}`;
+        const label = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+        months[key] = (months[key] || 0) + 1;
+      });
+      return Object.entries(months)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-6)
+        .map(([key, count]) => {
+          const [y, m] = key.split("-");
+          return { month: `${monthNames[parseInt(m)]}`, questions: count };
+        });
+    },
+  });
+
+  const { data: topDocs = [] } = useQuery({
+    queryKey: ["stats-topdocs"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("documents")
+        .select("title, view_count")
+        .order("view_count", { ascending: false })
+        .limit(5);
+      return (data || []).filter((d: any) => d.view_count > 0).map((d: any) => ({
+        name: d.title,
+        uses: d.view_count || 0,
+      }));
+    },
+  });
+
+  const kpis = [
+    { icon: MessageSquare, label: "Total questions", value: totalQuestions.toLocaleString(), sub: "Toutes les questions" },
+    { icon: Brain, label: "Réponses IA", value: totalResponses.toLocaleString(), sub: "Réponses générées" },
+    { icon: FileText, label: "Documents", value: totalDocs.toLocaleString(), sub: "Documents indexés" },
+    { icon: Users, label: "Utilisateurs", value: totalUsers.toLocaleString(), sub: "Comptes actifs" },
+  ];
+
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="mb-8">
@@ -35,14 +101,8 @@ const Stats = () => {
         <p className="text-muted-foreground mt-1">Analyse des performances de l'IA</p>
       </motion.div>
 
-      {/* KPIs */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {[
-          { icon: MessageSquare, label: "Total questions", value: "4,832", sub: "Ce trimestre" },
-          { icon: Brain, label: "Taux de résolution", value: "94%", sub: "Réponses pertinentes" },
-          { icon: Clock, label: "Temps moyen", value: "1.8s", sub: "Par réponse" },
-          { icon: TrendingUp, label: "Croissance", value: "+23%", sub: "vs mois dernier" },
-        ].map((kpi) => (
+        {kpis.map((kpi) => (
           <motion.div key={kpi.label} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="senstock-stat-card">
             <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center mb-3">
               <kpi.icon className="w-5 h-5 text-primary" />
@@ -55,70 +115,75 @@ const Stats = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-        {/* Monthly questions */}
         <div className="senstock-card p-6">
           <h3 className="font-display font-semibold text-foreground mb-4">Questions par mois</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={monthlyData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-              <XAxis dataKey="month" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
-              <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "8px" }} />
-              <Bar dataKey="questions" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {monthlyData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={monthlyData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                <XAxis dataKey="month" stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "8px" }} />
+                <Bar dataKey="questions" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-[250px] text-muted-foreground text-sm">
+              Aucune donnée disponible
+            </div>
+          )}
         </div>
 
-        {/* Topics pie */}
         <div className="senstock-card p-6">
-          <h3 className="font-display font-semibold text-foreground mb-4">Sujets populaires</h3>
-          <div className="flex items-center gap-6">
-            <ResponsiveContainer width="50%" height={200}>
-              <PieChart>
-                <Pie data={topicData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="value" strokeWidth={0}>
-                  {topicData.map((entry, i) => (
-                    <Cell key={i} fill={entry.fill} />
-                  ))}
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="space-y-2.5">
-              {topicData.map((t) => (
-                <div key={t.name} className="flex items-center gap-2.5">
-                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: t.fill }} />
-                  <span className="text-sm text-foreground">{t.name}</span>
-                  <span className="text-xs text-muted-foreground ml-auto">{t.value}%</span>
-                </div>
-              ))}
+          <h3 className="font-display font-semibold text-foreground mb-4">Aperçu global</h3>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+              <span className="text-sm text-foreground">Questions posées</span>
+              <span className="text-sm font-bold text-foreground">{totalQuestions}</span>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+              <span className="text-sm text-foreground">Réponses générées</span>
+              <span className="text-sm font-bold text-foreground">{totalResponses}</span>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+              <span className="text-sm text-foreground">Documents indexés</span>
+              <span className="text-sm font-bold text-foreground">{totalDocs}</span>
+            </div>
+            <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+              <span className="text-sm text-foreground">Utilisateurs</span>
+              <span className="text-sm font-bold text-foreground">{totalUsers}</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Top docs */}
       <div className="senstock-card p-6">
         <h3 className="font-display font-semibold text-foreground mb-4">Documents les plus consultés</h3>
-        <div className="space-y-3">
-          {topDocs.map((doc, i) => (
-            <div key={doc.name} className="flex items-center gap-4">
-              <span className="text-sm font-display font-bold text-muted-foreground w-6">{i + 1}</span>
-              <FileText className="w-4 h-4 text-primary flex-shrink-0" />
-              <span className="text-sm text-foreground flex-1">{doc.name}</span>
-              <div className="flex items-center gap-2">
-                <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${(doc.uses / topDocs[0].uses) * 100}%`,
-                      background: "var(--gradient-primary)",
-                    }}
-                  />
+        {topDocs.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4">Aucune consultation enregistrée.</p>
+        ) : (
+          <div className="space-y-3">
+            {topDocs.map((doc: any, i: number) => (
+              <div key={doc.name} className="flex items-center gap-4">
+                <span className="text-sm font-display font-bold text-muted-foreground w-6">{i + 1}</span>
+                <FileText className="w-4 h-4 text-primary flex-shrink-0" />
+                <span className="text-sm text-foreground flex-1 truncate">{doc.name}</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${topDocs[0]?.uses ? (doc.uses / topDocs[0].uses) * 100 : 0}%`,
+                        background: "var(--gradient-primary)",
+                      }}
+                    />
+                  </div>
+                  <span className="text-xs text-muted-foreground w-10 text-right">{doc.uses}</span>
                 </div>
-                <span className="text-xs text-muted-foreground w-10 text-right">{doc.uses}</span>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
