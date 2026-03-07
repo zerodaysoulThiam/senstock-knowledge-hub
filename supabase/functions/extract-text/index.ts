@@ -46,14 +46,13 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    const { file_url, title, file_type, file_size } = await req.json();
+    const { file_url, title, file_type, file_size, uploaded_by } = await req.json();
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Download the file
     const fileResponse = await fetch(file_url);
     const fileBuffer = await fileResponse.arrayBuffer();
     const uint8Array = new Uint8Array(fileBuffer);
@@ -64,9 +63,7 @@ serve(async (req) => {
     if (isTxt) {
       extractedText = new TextDecoder("utf-8").decode(uint8Array);
     } else if (LOVABLE_API_KEY) {
-      // Use safe base64 encoding for large files (no spread operator limit)
       const base64Content = base64Encode(uint8Array);
-
       const isPdf = file_type === "application/pdf" || file_type === "pdf" || title.endsWith(".pdf");
       const mimeType = isPdf
         ? "application/pdf"
@@ -74,8 +71,6 @@ serve(async (req) => {
 
       console.log(`Extracting text from ${title} (${mimeType}, ${uint8Array.length} bytes)...`);
 
-      // Use image_url format with data URI - this is the correct way to send
-      // documents through the OpenAI-compatible gateway for Gemini models
       const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -131,7 +126,6 @@ INSTRUCTIONS OBLIGATOIRES :
       }
     }
 
-    // Fallback: basic text extraction if AI failed
     if (extractedText.length < 50) {
       const rawText = new TextDecoder("utf-8").decode(uint8Array);
       extractedText = rawText
@@ -146,6 +140,54 @@ INSTRUCTIONS OBLIGATOIRES :
 
     const fullContent = extractedText.substring(0, 100000);
 
+    // Generate summary and keywords using AI
+    let summary = "";
+    let keywords = "";
+    if (LOVABLE_API_KEY && fullContent.length > 100) {
+      try {
+        const summaryResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${LOVABLE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "google/gemini-2.5-flash-lite",
+            messages: [
+              {
+                role: "user",
+                content: `Analyse ce document et retourne UNIQUEMENT un JSON avec deux champs:
+- "summary": un résumé court du document (2-3 phrases maximum)
+- "keywords": les 5 mots-clés principaux séparés par des virgules
+
+Document "${title}":
+${fullContent.substring(0, 5000)}
+
+Retourne UNIQUEMENT le JSON, sans autre texte.`,
+              },
+            ],
+          }),
+        });
+
+        if (summaryResponse.ok) {
+          const summaryData = await summaryResponse.json();
+          const summaryText = summaryData.choices?.[0]?.message?.content || "";
+          try {
+            const jsonMatch = summaryText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              summary = parsed.summary || "";
+              keywords = parsed.keywords || "";
+            }
+          } catch {
+            console.error("Failed to parse summary JSON");
+          }
+        }
+      } catch (e) {
+        console.error("Summary generation error:", e);
+      }
+    }
+
     // Save to documents table
     const { data, error } = await supabase
       .from("documents")
@@ -157,13 +199,16 @@ INSTRUCTIONS OBLIGATOIRES :
         file_size,
         status: "indexé",
         category: "general",
+        uploaded_by: uploaded_by || null,
+        summary,
+        keywords,
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    // Create chunks for RAG search
+    // Create chunks
     const chunks = chunkText(fullContent);
     if (chunks.length > 0) {
       const chunkRows = chunks.map((content, i) => ({
@@ -171,7 +216,7 @@ INSTRUCTIONS OBLIGATOIRES :
         content,
         chunk_index: i,
       }));
-      
+
       for (let i = 0; i < chunkRows.length; i += 50) {
         const batch = chunkRows.slice(i, i + 50);
         const { error: chunkError } = await supabase.from("document_chunks").insert(batch);
@@ -179,7 +224,7 @@ INSTRUCTIONS OBLIGATOIRES :
       }
     }
 
-    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks`);
+    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks, summary: ${summary.length > 0}`);
 
     return new Response(
       JSON.stringify({
