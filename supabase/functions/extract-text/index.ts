@@ -1,6 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -53,23 +52,22 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const fileResponse = await fetch(file_url);
-    const fileBuffer = await fileResponse.arrayBuffer();
-    const uint8Array = new Uint8Array(fileBuffer);
-
     let extractedText = "";
     const isTxt = file_type === "text/plain" || file_type === "txt" || title.endsWith(".txt");
 
     if (isTxt) {
-      extractedText = new TextDecoder("utf-8").decode(uint8Array);
+      // Only download for plain text (small files)
+      const fileResponse = await fetch(file_url);
+      const textContent = await fileResponse.text();
+      extractedText = textContent;
     } else if (LOVABLE_API_KEY) {
-      const base64Content = base64Encode(uint8Array);
+      // Pass URL directly to Gemini - no need to download file into memory
       const isPdf = file_type === "application/pdf" || file_type === "pdf" || title.endsWith(".pdf");
       const mimeType = isPdf
         ? "application/pdf"
         : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
-      console.log(`Extracting text from ${title} (${mimeType}, ${uint8Array.length} bytes)...`);
+      console.log(`Extracting text from ${title} via URL (${mimeType})...`);
 
       const aiResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
@@ -86,7 +84,7 @@ serve(async (req) => {
                 {
                   type: "image_url",
                   image_url: {
-                    url: `data:${mimeType};base64,${base64Content}`,
+                    url: file_url,
                   },
                 },
                 {
@@ -127,15 +125,7 @@ INSTRUCTIONS OBLIGATOIRES :
     }
 
     if (extractedText.length < 50) {
-      const rawText = new TextDecoder("utf-8").decode(uint8Array);
-      extractedText = rawText
-        .replace(/[^\x20-\x7E\xC0-\xFF\n\r\t àâäéèêëïîôùûüÿçœæÀÂÄÉÈÊËÏÎÔÙÛÜŸÇŒÆ]/g, " ")
-        .replace(/\s{3,}/g, "\n")
-        .trim();
-
-      if (extractedText.length < 50) {
-        extractedText = `[Document ${title} - Le contenu n'a pas pu être extrait. Type: ${file_type}.]`;
-      }
+      extractedText = `[Document ${title} - Le contenu n'a pas pu être extrait. Type: ${file_type}.]`;
     }
 
     const fullContent = extractedText.substring(0, 100000);
@@ -224,7 +214,7 @@ Retourne UNIQUEMENT le JSON, sans autre texte.`,
       }
     }
 
-    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks, summary: ${summary.length > 0}`);
+    console.log(`Document "${title}" indexed: ${fullContent.length} chars, ${chunks.length} chunks`);
 
     return new Response(
       JSON.stringify({
