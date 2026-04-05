@@ -65,13 +65,9 @@ serve(async (req) => {
       ).join("\n");
 
       try {
-        const rerankUrl = LOVABLE_API_KEY
-          ? "https://ai.gateway.lovable.dev/v1/chat/completions"
-          : OPENAI_URL;
-        const rerankAuth = LOVABLE_API_KEY
-          ? `Bearer ${LOVABLE_API_KEY}`
-          : `Bearer ${OPENAI_API_KEY}`;
-        const rerankModel = LOVABLE_API_KEY ? "google/gemini-2.5-flash-lite" : "gpt-4o-mini";
+        const rerankUrl = OPENAI_URL;
+        const rerankAuth = `Bearer ${OPENAI_API_KEY}`;
+        const rerankModel = "gpt-4o-mini";
 
         const rerankResponse = await fetch(rerankUrl, {
           method: "POST",
