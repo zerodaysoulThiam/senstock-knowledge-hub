@@ -16,7 +16,7 @@ serve(async (req) => {
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -65,13 +65,9 @@ serve(async (req) => {
       ).join("\n");
 
       try {
-        const rerankUrl = LOVABLE_API_KEY
-          ? "https://ai.gateway.lovable.dev/v1/chat/completions"
-          : OPENAI_URL;
-        const rerankAuth = LOVABLE_API_KEY
-          ? `Bearer ${LOVABLE_API_KEY}`
-          : `Bearer ${OPENAI_API_KEY}`;
-        const rerankModel = LOVABLE_API_KEY ? "google/gemini-2.5-flash-lite" : "gpt-4o-mini";
+        const rerankUrl = OPENAI_URL;
+        const rerankAuth = `Bearer ${OPENAI_API_KEY}`;
+        const rerankModel = "gpt-4o-mini";
 
         const rerankResponse = await fetch(rerankUrl, {
           method: "POST",
