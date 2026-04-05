@@ -7,10 +7,9 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-const OPENAI_MODEL = "gpt-4o-mini";
+const AI_GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
+const AI_MODEL = "google/gemini-2.5-flash";
 const MAX_CONTEXT_CHUNKS = 6;
-const MAX_RETRIES = 2;
 
 const MessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
@@ -21,79 +20,16 @@ const BodySchema = z.object({
   messages: z.array(MessageSchema).min(1).max(50),
 });
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const normalizeText = (value: string) =>
-  value
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+  value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 const extractSearchTerms = (value: string) =>
-  normalizeText(value)
-    .split(/\s+/)
-    .filter((word) => word.length > 2);
+  normalizeText(value).split(/\s+/).filter((word) => word.length > 2);
 
 const scoreText = (value: string, searchTerms: string[]) => {
   const normalized = normalizeText(value);
   return searchTerms.reduce((score, term) => score + (normalized.includes(term) ? 1 : 0), 0);
 };
-
-async function fetchOpenAIWithRetry(apiKey: string, payload: Record<string, unknown>) {
-  let lastResponse: Response | null = null;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const response = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (response.ok || (response.status !== 429 && response.status < 500)) {
-      return response;
-    }
-
-    lastResponse = response;
-
-    const retryAfterHeader = response.headers.get("retry-after");
-    const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
-    const backoffMs = Number.isFinite(retryAfterSeconds)
-      ? retryAfterSeconds * 1000
-      : Math.min(1500 * (attempt + 1), 5000);
-
-    const debugText = await response.clone().text().catch(() => "");
-    console.warn(`OpenAI temporary error [attempt ${attempt + 1}/${MAX_RETRIES + 1}]`, response.status, debugText);
-
-    if (attempt < MAX_RETRIES) {
-      await wait(backoffMs);
-    }
-  }
-
-  return lastResponse!;
-}
-
-async function buildRateLimitResponse(response: Response) {
-  const retryAfter = response.headers.get("retry-after") ?? "20";
-  const rawText = await response.text();
-  const lowerText = rawText.toLowerCase();
-  const isQuotaIssue = lowerText.includes("insufficient_quota") || lowerText.includes("quota");
-
-  return new Response(JSON.stringify({
-    error: isQuotaIssue
-      ? "Quota OpenAI insuffisant. Vérifiez votre facturation ou vos limites OpenAI."
-      : "Trop de requêtes envoyées à OpenAI. Réessayez dans quelques secondes.",
-  }), {
-    status: isQuotaIssue ? 402 : 429,
-    headers: {
-      ...corsHeaders,
-      "Content-Type": "application/json",
-      "Retry-After": retryAfter,
-    },
-  });
-}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -112,17 +48,17 @@ serve(async (req) => {
     }
 
     const { messages } = parsedBody.data;
-    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 
-    if (!OPENAI_API_KEY) {
-      throw new Error("OPENAI_API_KEY is not configured");
+    if (!LOVABLE_API_KEY) {
+      throw new Error("LOVABLE_API_KEY is not configured");
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const lastUserMessage = [...messages].reverse().find((message) => message.role === "user")?.content || "";
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user")?.content || "";
     const searchTerms = extractSearchTerms(lastUserMessage);
     let contextText = "";
 
@@ -132,35 +68,34 @@ serve(async (req) => {
       .limit(500);
 
     if (chunks && chunks.length > 0) {
-      const docIds = [...new Set(chunks.map((chunk) => chunk.document_id))];
+      const docIds = [...new Set(chunks.map((c) => c.document_id))];
       const { data: docs } = await supabase
         .from("documents")
         .select("id, title")
         .in("id", docIds);
 
-      const docMap = new Map((docs || []).map((doc) => [doc.id, doc.title]));
+      const docMap = new Map((docs || []).map((d) => [d.id, d.title]));
 
-      const annotatedChunks = chunks.map((chunk) => ({
-        ...chunk,
-        docTitle: docMap.get(chunk.document_id) || "Document inconnu",
-      }));
-
-      const rankedChunks = annotatedChunks
-        .map((chunk) => ({
-          ...chunk,
-          score: scoreText(chunk.docTitle, searchTerms) * 2 + scoreText(chunk.content, searchTerms),
-        }))
+      const rankedChunks = chunks
+        .map((chunk) => {
+          const docTitle = docMap.get(chunk.document_id) || "Document inconnu";
+          return {
+            ...chunk,
+            docTitle,
+            score: scoreText(docTitle, searchTerms) * 2 + scoreText(chunk.content, searchTerms),
+          };
+        })
         .sort((a, b) => b.score - a.score || a.chunk_index - b.chunk_index);
 
       const selectedChunks = (searchTerms.length > 0
-        ? rankedChunks.filter((chunk) => chunk.score > 0)
+        ? rankedChunks.filter((c) => c.score > 0)
         : rankedChunks
       ).slice(0, MAX_CONTEXT_CHUNKS);
 
       if (selectedChunks.length > 0) {
-        contextText = selectedChunks.map((chunk) => (
-          `[Source: ${chunk.docTitle}, Passage ${chunk.chunk_index + 1}]\n${chunk.content}`
-        )).join("\n\n---\n\n");
+        contextText = selectedChunks.map((c) =>
+          `[Source: ${c.docTitle}, Passage ${c.chunk_index + 1}]\n${c.content}`
+        ).join("\n\n---\n\n");
       }
     }
 
@@ -191,7 +126,7 @@ serve(async (req) => {
 
     const systemPrompt = `Tu es SenStock AI Brain, l'assistant intelligent de SenStock, le plus grand dépôt de stockage d'hydrocarbures au Sénégal (284 millions de litres de capacité).
 
-Tu réponds en te basant PRIORITAIREMENT sur les documents internes de l'entreprise fournis ci-dessous. Tu as accès au contenu intégral des documents téléversés par l'entreprise.
+Tu réponds en te basant PRIORITAIREMENT sur les documents internes de l'entreprise fournis ci-dessous.
 
 RÈGLES CRITIQUES :
 1. Réponds en français, de manière professionnelle, précise et détaillée.
@@ -208,36 +143,37 @@ ${contextText
   ? `--- DOCUMENTS INTERNES DE SENSTOCK ---\n${contextText}\n--- FIN DES DOCUMENTS ---`
   : "⚠️ Aucun document interne trouvé pour cette question. Tu peux répondre avec tes connaissances générales en le précisant clairement."}`;
 
-    const response = await fetchOpenAIWithRetry(OPENAI_API_KEY, {
-      model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...messages,
-      ],
-      stream: true,
+    const response = await fetch(AI_GATEWAY_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...messages,
+        ],
+        stream: true,
+      }),
     });
 
     if (!response.ok) {
       if (response.status === 429) {
-        return await buildRateLimitResponse(response);
-      }
-
-      if (response.status === 401) {
-        return new Response(JSON.stringify({ error: "Clé OpenAI invalide ou expirée." }), {
-          status: 401,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        return new Response(JSON.stringify({ error: "Limite de requêtes atteinte. Réessayez dans quelques secondes." }), {
+          status: 429,
+          headers: { ...corsHeaders, "Content-Type": "application/json", "Retry-After": "10" },
         });
       }
-
       if (response.status === 402) {
-        return new Response(JSON.stringify({ error: "Crédits OpenAI insuffisants." }), {
+        return new Response(JSON.stringify({ error: "Crédits IA épuisés. Ajoutez des fonds dans Paramètres > Workspace > Usage." }), {
           status: 402,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-
       const errorText = await response.text();
-      console.error("OpenAI API error:", response.status, errorText);
+      console.error("AI gateway error:", response.status, errorText);
       return new Response(JSON.stringify({ error: "Erreur du service IA" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
