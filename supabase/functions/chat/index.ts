@@ -9,7 +9,7 @@ const corsHeaders = {
 
 const AI_GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 const AI_MODEL = "google/gemini-2.5-flash";
-const MAX_CONTEXT_CHUNKS = 6;
+const MAX_CONTEXT_CHUNKS = 10;
 
 const MessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
@@ -23,12 +23,25 @@ const BodySchema = z.object({
 const normalizeText = (value: string) =>
   value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-const extractSearchTerms = (value: string) =>
-  normalizeText(value).split(/\s+/).filter((word) => word.length > 2);
+const extractSearchTerms = (value: string) => {
+  const stopWords = new Set(["les", "des", "une", "pour", "dans", "avec", "sur", "par", "que", "qui", "est", "sont", "fait", "faire", "comment", "quel", "quelle", "quels", "quelles", "cette", "ces"]);
+  return normalizeText(value)
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !stopWords.has(word));
+};
 
 const scoreText = (value: string, searchTerms: string[]) => {
   const normalized = normalizeText(value);
-  return searchTerms.reduce((score, term) => score + (normalized.includes(term) ? 1 : 0), 0);
+  let score = 0;
+  for (const term of searchTerms) {
+    const regex = new RegExp(term, "g");
+    const matches = normalized.match(regex);
+    if (matches) score += matches.length;
+  }
+  // Bonus for exact phrase match
+  const fullQuery = searchTerms.join(" ");
+  if (fullQuery.length > 5 && normalized.includes(fullQuery)) score += 5;
+  return score;
 };
 
 serve(async (req) => {
@@ -58,31 +71,44 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user")?.content || "";
-    const searchTerms = extractSearchTerms(lastUserMessage);
-    let contextText = "";
+    // Extract search context from last 3 user messages for better relevance
+    const recentUserMessages = messages
+      .filter((m) => m.role === "user")
+      .slice(-3)
+      .map((m) => m.content);
+    const lastUserMessage = recentUserMessages[recentUserMessages.length - 1] || "";
+    const combinedContext = recentUserMessages.join(" ");
+    const searchTerms = extractSearchTerms(combinedContext);
 
+    let contextText = "";
+    let sourcesFound = false;
+
+    // Search document chunks
     const { data: chunks } = await supabase
       .from("document_chunks")
       .select("content, chunk_index, document_id")
-      .limit(500);
+      .limit(1000);
 
     if (chunks && chunks.length > 0) {
       const docIds = [...new Set(chunks.map((c) => c.document_id))];
       const { data: docs } = await supabase
         .from("documents")
-        .select("id, title")
+        .select("id, title, category")
         .in("id", docIds);
 
-      const docMap = new Map((docs || []).map((d) => [d.id, d.title]));
+      const docMap = new Map((docs || []).map((d) => [d.id, { title: d.title, category: d.category }]));
 
       const rankedChunks = chunks
         .map((chunk) => {
-          const docTitle = docMap.get(chunk.document_id) || "Document inconnu";
+          const doc = docMap.get(chunk.document_id) || { title: "Document inconnu", category: null };
+          const titleScore = scoreText(doc.title, searchTerms) * 3;
+          const contentScore = scoreText(chunk.content, searchTerms);
+          const categoryScore = doc.category ? scoreText(doc.category, searchTerms) * 2 : 0;
           return {
             ...chunk,
-            docTitle,
-            score: scoreText(docTitle, searchTerms) * 2 + scoreText(chunk.content, searchTerms),
+            docTitle: doc.title,
+            category: doc.category,
+            score: titleScore + contentScore + categoryScore,
           };
         })
         .sort((a, b) => b.score - a.score || a.chunk_index - b.chunk_index);
@@ -93,55 +119,84 @@ serve(async (req) => {
       ).slice(0, MAX_CONTEXT_CHUNKS);
 
       if (selectedChunks.length > 0) {
+        sourcesFound = true;
         contextText = selectedChunks.map((c) =>
-          `[Source: ${c.docTitle}, Passage ${c.chunk_index + 1}]\n${c.content}`
+          `[Source: ${c.docTitle}${c.category ? ` | Catégorie: ${c.category}` : ""}, Passage ${c.chunk_index + 1}]\n${c.content}`
         ).join("\n\n---\n\n");
       }
     }
 
+    // Fallback: search full documents
     if (!contextText) {
       const { data: docs } = await supabase
         .from("documents")
-        .select("title, content")
+        .select("title, content, category")
         .not("content", "is", null)
-        .limit(10);
+        .limit(20);
 
       if (docs && docs.length > 0) {
         const scoredDocs = docs
           .map((doc) => ({
             ...doc,
-            score: scoreText(`${doc.title} ${doc.content || ""}`, searchTerms),
+            score: scoreText(`${doc.title} ${doc.category || ""} ${doc.content || ""}`, searchTerms),
           }))
           .filter((doc) => searchTerms.length === 0 || doc.score > 0)
           .sort((a, b) => b.score - a.score)
-          .slice(0, 3);
+          .slice(0, 5);
 
         if (scoredDocs.length > 0) {
+          sourcesFound = true;
           contextText = scoredDocs
-            .map((doc) => `[Source: ${doc.title}]\n${doc.content?.substring(0, 3000)}`)
+            .map((doc) => `[Source: ${doc.title}${doc.category ? ` | Catégorie: ${doc.category}` : ""}]\n${doc.content?.substring(0, 4000)}`)
             .join("\n\n---\n\n");
         }
       }
     }
 
+    // Build available documents list for context awareness
+    let docListText = "";
+    const { data: allDocs } = await supabase
+      .from("documents")
+      .select("title, category")
+      .limit(50);
+    if (allDocs && allDocs.length > 0) {
+      docListText = "\n\nDOCUMENTS DISPONIBLES DANS LA BASE :\n" +
+        allDocs.map((d) => `- ${d.title}${d.category ? ` (${d.category})` : ""}`).join("\n");
+    }
+
     const systemPrompt = `Tu es SenStock AI Brain, l'assistant intelligent de SenStock, le plus grand dépôt de stockage d'hydrocarbures au Sénégal (284 millions de litres de capacité).
 
-Tu réponds en te basant PRIORITAIREMENT sur les documents internes de l'entreprise fournis ci-dessous.
+CAPACITÉS :
+1. **Documents internes** : Tu as accès à la base documentaire de SenStock et tu t'en sers en PRIORITÉ.
+2. **Connaissances générales** : Tu disposes de vastes connaissances sur l'industrie pétrolière, la logistique des hydrocarbures, les normes de sécurité (HSE), la réglementation sénégalaise et internationale, les meilleures pratiques industrielles, et bien plus.
 
-RÈGLES CRITIQUES :
-1. Réponds en français, de manière professionnelle, précise et détaillée.
-2. Cite TOUJOURS tes sources internes avec le format exact : [Source: nom_du_document, Passage X].
+RÈGLES DE RÉPONSE :
+1. Réponds TOUJOURS en français, de manière professionnelle, précise et détaillée.
+2. **Priorité absolue aux documents internes** : Si l'information existe dans les documents fournis, cite-la avec le format exact [Source: nom_du_document, Passage X].
 3. Si plusieurs documents/passages sont pertinents, cite-les TOUS.
-4. Ne fabrique JAMAIS d'informations. Si le contenu ne couvre pas la question, dis-le clairement.
-5. Base tes réponses PRIORITAIREMENT sur le contenu réel des documents internes.
+4. **Complément avec connaissances générales** : Si les documents internes ne couvrent pas entièrement la question, complète avec tes connaissances en ajoutant clairement :
+   "📚 **Complément (connaissances générales)** :" avant la section basée sur tes connaissances.
+5. Ne fabrique JAMAIS d'informations spécifiques à SenStock. Pour les données internes non trouvées, dis-le clairement.
 6. Si tu trouves des numéros de page ([Page X]) dans le texte, cite aussi la page.
-7. Fournis des réponses complètes et détaillées, ne résume pas excessivement.
-8. Si les documents internes ne contiennent pas la réponse, tu peux utiliser tes connaissances générales pour compléter, en précisant clairement : "⚠️ Information complémentaire (source externe):" avant la partie basée sur tes connaissances.
-9. Tu peux aussi répondre à des questions générales sur l'industrie pétrolière, la logistique, la sécurité des hydrocarbures, etc.
+7. Fournis des réponses COMPLÈTES et DÉTAILLÉES avec des exemples concrets quand possible.
+8. Structure tes réponses avec des titres, listes et mise en forme markdown.
+9. Pour les questions techniques (sécurité, normes, procédures industrielles), fournis des réponses exhaustives en combinant sources internes ET connaissances.
+10. Tu peux répondre à TOUT type de question : opérations, sécurité, réglementation, formation, RH, logistique, maintenance, environnement, etc.
+
+DOMAINES D'EXPERTISE :
+- Stockage et distribution d'hydrocarbures
+- Sécurité industrielle et HSE (ATEX, SEVESO, normes API, NFPA)
+- Logistique pétrolière (réception, stockage, expédition)
+- Réglementation sénégalaise et UEMOA sur les hydrocarbures
+- Maintenance des équipements pétroliers
+- Protection de l'environnement et gestion des déversements
+- Gestion des ressources humaines dans l'industrie
+- Formation et développement des compétences
+${docListText}
 
 ${contextText
   ? `--- DOCUMENTS INTERNES DE SENSTOCK ---\n${contextText}\n--- FIN DES DOCUMENTS ---`
-  : "⚠️ Aucun document interne trouvé pour cette question. Tu peux répondre avec tes connaissances générales en le précisant clairement."}`;
+  : "⚠️ Aucun document interne pertinent trouvé pour cette question. Réponds avec tes connaissances générales en le précisant clairement avec le marqueur 📚."}`;
 
     const response = await fetch(AI_GATEWAY_URL, {
       method: "POST",
@@ -156,6 +211,7 @@ ${contextText
           ...messages,
         ],
         stream: true,
+        temperature: 0.4,
       }),
     });
 
@@ -167,7 +223,7 @@ ${contextText
         });
       }
       if (response.status === 402) {
-        return new Response(JSON.stringify({ error: "Crédits IA épuisés. Ajoutez des fonds dans Paramètres > Workspace > Usage." }), {
+        return new Response(JSON.stringify({ error: "Crédits IA épuisés. Contactez l'administrateur." }), {
           status: 402,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
