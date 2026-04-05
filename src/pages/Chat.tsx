@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Brain, User, Sparkles, Loader2, History, Plus } from "lucide-react";
+import { Send, Brain, User, Sparkles, Loader2, Plus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
@@ -25,31 +25,52 @@ const Chat = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const isCoolingDown = cooldownUntil !== null;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Load user and chat history
+  useEffect(() => {
+    if (!cooldownUntil) return;
+
+    const remaining = cooldownUntil - Date.now();
+    if (remaining <= 0) {
+      setCooldownUntil(null);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setCooldownUntil(null), remaining);
+    return () => window.clearTimeout(timeoutId);
+  }, [cooldownUntil]);
+
   useEffect(() => {
     const loadHistory = async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setLoadingHistory(false); return; }
+      if (!user) {
+        setLoadingHistory(false);
+        return;
+      }
+
       setUserId(user.id);
-      
+
       const { data } = await supabase
         .from("chat_messages")
         .select("role, content")
         .eq("user_id", user.id)
         .order("created_at", { ascending: true })
         .limit(100);
-      
+
       if (data && data.length > 0) {
-        setMessages(data.map((m: any) => ({ role: m.role, content: m.content })));
+        setMessages(data.map((message: any) => ({ role: message.role, content: message.content })));
       }
+
       setLoadingHistory(false);
     };
+
     loadHistory();
   }, []);
 
@@ -67,13 +88,20 @@ const Chat = () => {
 
   const sendMessage = async (text: string) => {
     if (!text.trim() || isLoading) return;
-    const userMsg: Message = { role: "user", content: text.trim() };
-    const allMessages = [...messages, userMsg];
+
+    if (isCoolingDown) {
+      toast.error("Patientez quelques secondes avant de réessayer.");
+      return;
+    }
+
+    const trimmedText = text.trim();
+    const previousMessages = messages;
+    const userMsg: Message = { role: "user", content: trimmedText };
+    const allMessages = [...previousMessages, userMsg];
+
     setMessages(allMessages);
     setInput("");
     setIsLoading(true);
-
-    await saveMessage("user", text.trim());
 
     let assistantSoFar = "";
     const upsertAssistant = (chunk: string) => {
@@ -81,7 +109,9 @@ const Chat = () => {
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant") {
-          return prev.map((m, i) => (i === prev.length - 1 ? { ...m, content: assistantSoFar } : m));
+          return prev.map((message, index) => (
+            index === prev.length - 1 ? { ...message, content: assistantSoFar } : message
+          ));
         }
         return [...prev, { role: "assistant", content: assistantSoFar }];
       });
@@ -97,9 +127,31 @@ const Chat = () => {
         body: JSON.stringify({ messages: allMessages }),
       });
 
-      if (resp.status === 429) { toast.error("Limite de requêtes atteinte."); setIsLoading(false); return; }
-      if (resp.status === 402) { toast.error("Crédits IA insuffisants."); setIsLoading(false); return; }
-      if (!resp.ok || !resp.body) throw new Error("Erreur de connexion");
+      const errorPayload = !resp.ok ? await resp.json().catch(() => null) : null;
+
+      if (resp.status === 429) {
+        const retryAfterValue = Number(resp.headers.get("Retry-After") ?? "20");
+        const retryAfterSeconds = Number.isFinite(retryAfterValue) ? retryAfterValue : 20;
+
+        setCooldownUntil(Date.now() + retryAfterSeconds * 1000);
+        setMessages(previousMessages);
+        setInput(trimmedText);
+        toast.error(errorPayload?.error ?? "Limite de requêtes atteinte. Réessayez dans quelques secondes.");
+        return;
+      }
+
+      if (resp.status === 402) {
+        setMessages(previousMessages);
+        setInput(trimmedText);
+        toast.error(errorPayload?.error ?? "Crédits IA insuffisants.");
+        return;
+      }
+
+      if (!resp.ok || !resp.body) {
+        throw new Error(errorPayload?.error ?? "Erreur de connexion");
+      }
+
+      await saveMessage("user", trimmedText);
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -117,8 +169,10 @@ const Chat = () => {
           if (line.endsWith("\r")) line = line.slice(0, -1);
           if (line.startsWith(":") || line.trim() === "") continue;
           if (!line.startsWith("data: ")) continue;
+
           const jsonStr = line.slice(6).trim();
           if (jsonStr === "[DONE]") break;
+
           try {
             const parsed = JSON.parse(jsonStr);
             const content = parsed.choices?.[0]?.delta?.content;
@@ -133,9 +187,11 @@ const Chat = () => {
       if (assistantSoFar) {
         await saveMessage("assistant", assistantSoFar);
       }
-    } catch (e: any) {
-      console.error(e);
-      toast.error("Erreur lors de la communication avec l'IA");
+    } catch (error: any) {
+      console.error(error);
+      setMessages(previousMessages);
+      setInput(trimmedText);
+      toast.error(error?.message || "Erreur lors de la communication avec l'IA");
     } finally {
       setIsLoading(false);
     }
@@ -188,9 +244,9 @@ const Chat = () => {
             <h2 className="font-display text-2xl font-bold text-foreground mb-2">Comment puis-je vous aider ?</h2>
             <p className="text-muted-foreground text-sm mb-8">Posez-moi vos questions sur les opérations, procédures et données de SenStock.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
-              {suggestions.map((s) => (
-                <button key={s} onClick={() => sendMessage(s)} className="senstock-card text-left px-4 py-3 text-sm text-foreground hover:border-primary/30 transition-colors">
-                  {s}
+              {suggestions.map((suggestion) => (
+                <button key={suggestion} onClick={() => sendMessage(suggestion)} className="senstock-card text-left px-4 py-3 text-sm text-foreground hover:border-primary/30 transition-colors">
+                  {suggestion}
                 </button>
               ))}
             </div>
@@ -198,8 +254,8 @@ const Chat = () => {
         )}
 
         <AnimatePresence>
-          {messages.map((msg, i) => (
-            <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className={`flex gap-3 max-w-3xl ${msg.role === "user" ? "ml-auto flex-row-reverse" : ""}`}>
+          {messages.map((msg, index) => (
+            <motion.div key={index} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className={`flex gap-3 max-w-3xl ${msg.role === "user" ? "ml-auto flex-row-reverse" : ""}`}>
               <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${msg.role === "user" ? "bg-primary text-primary-foreground" : "bg-muted text-foreground"}`}>
                 {msg.role === "user" ? <User className="w-4 h-4" /> : <Brain className="w-4 h-4" />}
               </div>
@@ -239,17 +295,22 @@ const Chat = () => {
             onChange={(e) => setInput(e.target.value)}
             placeholder="Posez votre question à SenStock AI Brain..."
             className="senstock-input flex-1"
-            disabled={isLoading}
+            disabled={isLoading || isCoolingDown}
           />
           <button
             type="submit"
-            disabled={!input.trim() || isLoading}
+            disabled={!input.trim() || isLoading || isCoolingDown}
             className="w-11 h-11 rounded-lg flex items-center justify-center text-primary-foreground transition-all hover:opacity-90 disabled:opacity-40"
             style={{ background: "var(--gradient-primary)" }}
           >
             <Send className="w-5 h-5" />
           </button>
         </form>
+        {isCoolingDown && (
+          <p className="max-w-3xl mx-auto mt-2 text-xs text-muted-foreground">
+            Trop de requêtes ont été envoyées. Réessayez dans quelques secondes.
+          </p>
+        )}
       </div>
     </div>
   );
