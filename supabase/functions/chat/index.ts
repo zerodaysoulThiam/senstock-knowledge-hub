@@ -6,13 +6,17 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const { messages } = await req.json();
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
+
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -20,7 +24,7 @@ serve(async (req) => {
 
     const lastUserMessage = [...messages].reverse().find((m: any) => m.role === "user")?.content || "";
 
-    // Fetch all chunks with document info - increased limit for better coverage
+    // Fetch all chunks with document info
     const { data: chunks } = await supabase
       .from("document_chunks")
       .select("content, chunk_index, document_id")
@@ -29,7 +33,6 @@ serve(async (req) => {
     let contextText = "";
 
     if (chunks && chunks.length > 0) {
-      // Get document titles
       const docIds = [...new Set(chunks.map((c: any) => c.document_id))];
       const { data: docs } = await supabase
         .from("documents")
@@ -43,34 +46,41 @@ serve(async (req) => {
         idx: i,
       }));
 
-      // Step 1: Pre-filter with keyword matching to reduce candidate set
+      // Pre-filter with keyword matching
       const searchTerms = lastUserMessage.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2);
       let candidates = annotatedChunks;
-      
+
       if (searchTerms.length > 0 && annotatedChunks.length > 30) {
         const scored = annotatedChunks.map((c: any) => {
           const text = (c.content + " " + c.docTitle).toLowerCase();
           const score = searchTerms.reduce((s: number, term: string) => s + (text.includes(term) ? 1 : 0), 0);
           return { ...c, preScore: score };
         });
-        // Keep top 30 candidates by keyword relevance, or all if few chunks
         candidates = scored.sort((a: any, b: any) => b.preScore - a.preScore).slice(0, 30);
       }
 
-      // Step 2: Semantic reranking via LLM on filtered candidates
+      // Semantic reranking via Lovable AI (cheaper model for reranking)
       const chunkSummaries = candidates.map((c: any, i: number) =>
         `[${i}] (${c.docTitle}, Passage ${c.chunk_index + 1}): ${c.content.substring(0, 300)}`
       ).join("\n");
 
       try {
-        const rerankResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        const rerankUrl = LOVABLE_API_KEY
+          ? "https://ai.gateway.lovable.dev/v1/chat/completions"
+          : OPENAI_URL;
+        const rerankAuth = LOVABLE_API_KEY
+          ? `Bearer ${LOVABLE_API_KEY}`
+          : `Bearer ${OPENAI_API_KEY}`;
+        const rerankModel = LOVABLE_API_KEY ? "google/gemini-2.5-flash-lite" : "gpt-4o-mini";
+
+        const rerankResponse = await fetch(rerankUrl, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${LOVABLE_API_KEY}`,
+            Authorization: rerankAuth,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "google/gemini-2.5-flash-lite",
+            model: rerankModel,
             messages: [
               {
                 role: "system",
@@ -113,7 +123,7 @@ INSTRUCTIONS :
         console.error("Rerank error:", e);
       }
 
-      // Fallback: keyword search if reranking failed
+      // Fallback: keyword search
       if (!contextText && searchTerms.length > 0) {
         const scored = annotatedChunks.map((c: any) => {
           const text = c.content.toLowerCase();
@@ -155,27 +165,29 @@ INSTRUCTIONS :
 
     const systemPrompt = `Tu es SenStock AI Brain, l'assistant intelligent de SenStock, le plus grand dépôt de stockage d'hydrocarbures au Sénégal (284 millions de litres de capacité).
 
-Tu réponds UNIQUEMENT en te basant sur les documents internes de l'entreprise fournis ci-dessous. Tu as accès au contenu intégral des documents téléversés par l'entreprise.
+Tu réponds en te basant PRIORITAIREMENT sur les documents internes de l'entreprise fournis ci-dessous. Tu as accès au contenu intégral des documents téléversés par l'entreprise.
 
 RÈGLES CRITIQUES :
 1. Réponds en français, de manière professionnelle, précise et détaillée.
-2. Cite TOUJOURS tes sources avec le format exact : [Source: nom_du_document, Passage X].
+2. Cite TOUJOURS tes sources internes avec le format exact : [Source: nom_du_document, Passage X].
 3. Si plusieurs documents/passages sont pertinents, cite-les TOUS.
 4. Ne fabrique JAMAIS d'informations. Si le contenu ne couvre pas la question, dis-le clairement.
-5. Base tes réponses UNIQUEMENT sur le contenu réel des documents, jamais sur des connaissances externes.
+5. Base tes réponses PRIORITAIREMENT sur le contenu réel des documents internes.
 6. Si tu trouves des numéros de page ([Page X]) dans le texte, cite aussi la page.
 7. Fournis des réponses complètes et détaillées, ne résume pas excessivement.
+8. Si les documents internes ne contiennent pas la réponse, tu peux utiliser tes connaissances générales pour compléter, en précisant clairement : "⚠️ Information complémentaire (source externe):" avant la partie basée sur tes connaissances.
+9. Tu peux aussi répondre à des questions générales sur l'industrie pétrolière, la logistique, la sécurité des hydrocarbures, etc.
 
-${contextText ? `--- DOCUMENTS INTERNES DE SENSTOCK ---\n${contextText}\n--- FIN DES DOCUMENTS ---` : "⚠️ Aucun document interne trouvé pour cette question. Suggère à l'utilisateur de téléverser les documents pertinents dans la section Documents."}`;
+${contextText ? `--- DOCUMENTS INTERNES DE SENSTOCK ---\n${contextText}\n--- FIN DES DOCUMENTS ---` : "⚠️ Aucun document interne trouvé pour cette question. Tu peux répondre avec tes connaissances générales en le précisant clairement."}`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const response = await fetch(OPENAI_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
+        model: "gpt-4o",
         messages: [
           { role: "system", content: systemPrompt },
           ...messages,
@@ -196,7 +208,7 @@ ${contextText ? `--- DOCUMENTS INTERNES DE SENSTOCK ---\n${contextText}\n--- FIN
         });
       }
       const t = await response.text();
-      console.error("AI gateway error:", response.status, t);
+      console.error("OpenAI API error:", response.status, t);
       return new Response(JSON.stringify({ error: "Erreur du service IA" }), {
         status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
